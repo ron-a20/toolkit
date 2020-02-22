@@ -47,21 +47,16 @@ export function isRetryableStatusCode(statusCode?: number): boolean {
   return retryableStatusCodes.includes(statusCode)
 }
 
-export function getContentRange(
-  start: number,
-  end: number,
-  total: number
-): string {
+export function getContentRange(start: number, end: number): string {
   // Format: `bytes start-end/fileSize
   // start and end are inclusive
   // For a 200 byte chunk starting at byte 0:
-  // Content-Range: bytes 0-199/200
-  return `bytes ${start}-${end}/${total}`
+  // Content-Range: bytes 0-199/*
+  return `bytes ${start}-${end}/*`
 }
 
 export function getRequestOptions(
   contentType?: string,
-  contentLength?: number,
   contentRange?: string
 ): IHeaders {
   const requestOptions: IHeaders = {
@@ -69,9 +64,6 @@ export function getRequestOptions(
   }
   if (contentType) {
     requestOptions['Content-Type'] = contentType
-  }
-  if (contentLength) {
-    requestOptions['Content-Length'] = contentLength
   }
   if (contentRange) {
     requestOptions['Content-Range'] = contentRange
@@ -97,19 +89,42 @@ export function getArtifactUrl(): string {
  * file systems such as NTFS. To maintain platform-agnostic behavior, all characters that are not supported by an
  * individual filesystem/platform will not be supported on all fileSystems/platforms
  */
-const invalidCharacters = ['\\', '/', '"', ':', '<', '>', '|', '*', '?', ' ']
+const invalidArtifactFileCharacters = ['"', ':', '<', '>', '|', '*', '?', ' ']
+const invalidArtifactNameCharacters = ['\\', '/']
 
 /**
- * Scans the name of the item being uploaded to make sure there are no illegal characters
+ * Scans the name of the artifact to make sure there are no illegal characters
  */
 export function checkArtifactName(name: string): void {
   if (!name) {
     throw new Error(`Artifact name: ${name}, is incorrectly provided`)
   }
+
+  // The artifact name is the most restrictive in terms of invalid characters
+  const invalidCharacters = invalidArtifactFileCharacters.concat(
+    invalidArtifactNameCharacters
+  )
   for (const invalidChar of invalidCharacters) {
     if (name.includes(invalidChar)) {
       throw new Error(
-        `Artifact name is not valid: ${name}. Contains character: "${invalidChar}". Invalid characters include: ${invalidCharacters.toString()}.`
+        `Artifact name is not valid: ${name}. Contains character: "${invalidChar}". Invalid artifact name characters include: ${invalidCharacters.toString()}.`
+      )
+    }
+  }
+}
+
+/**
+ * Scans the name of the filePath used to make sure there are no illegal characters
+ */
+export function checkArtifactFilePath(path: string): void {
+  if (!path) {
+    throw new Error(`Artifact path: ${path}, is incorrectly provided`)
+  }
+
+  for (const invalidChar of invalidArtifactFileCharacters) {
+    if (path.includes(invalidChar)) {
+      throw new Error(
+        `Artifact path is not valid: ${path}. Contains character: "${invalidChar}". Invalid characters include: ${invalidArtifactFileCharacters.toString()}.`
       )
     }
   }

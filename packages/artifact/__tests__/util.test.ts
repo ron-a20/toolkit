@@ -49,6 +49,36 @@ describe('Utils', () => {
     }
   })
 
+  it('Check Artifact File Paths for any invalid characters', () => {
+    const invalidPaths = [
+      'path/my"artifact',
+      'path/my:artifact',
+      'path/my<artifact',
+      'path/my>artifact',
+      'path/my|artifact',
+      'path/my*artifact',
+      'path/my?artifact',
+      'path/my artifact',
+      ''
+    ]
+    for (const invalidName of invalidPaths) {
+      expect(() => {
+        utils.checkArtifactFilePath(invalidName)
+      }).toThrow()
+    }
+
+    const validPaths = [
+      'path/my-normal-artifact',
+      'path\\myNormalArtifact',
+      '/path/../..\\././m¥ñðrmålÄr†ï£å¢†'
+    ]
+    for (const validPath of validPaths) {
+      expect(() => {
+        utils.checkArtifactName(validPath)
+      }).not.toThrow()
+    }
+  })
+
   it('Test constructing artifact URL', () => {
     const runtimeUrl = getRuntimeUrl()
     const runId = getWorkFlowRunId()
@@ -60,15 +90,13 @@ describe('Utils', () => {
 
   it('Test constructing headers with all optional parameters', () => {
     const type = 'application/json'
-    const size = 24
-    const range = 'bytes 0-199/200'
-    const options = utils.getRequestOptions(type, size, range)
-    expect(Object.keys(options).length).toEqual(4)
+    const range = 'bytes 0-199/*'
+    const options = utils.getRequestOptions(type, range)
+    expect(Object.keys(options).length).toEqual(3)
     expect(options['Accept']).toEqual(
       `${type};api-version=${utils.getApiVersion()}`
     )
     expect(options['Content-Type']).toEqual(type)
-    expect(options['Content-Length']).toEqual(size)
     expect(options['Content-Range']).toEqual(range)
   })
 

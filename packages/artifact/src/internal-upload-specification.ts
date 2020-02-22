@@ -1,7 +1,7 @@
 import * as fs from 'fs'
 import {debug} from '@actions/core'
 import {join, normalize, resolve} from 'path'
-import {checkArtifactName} from './internal-utils'
+import {checkArtifactName, checkArtifactFilePath} from './internal-utils'
 
 export interface UploadSpecification {
   absoluteFilePath: string
@@ -58,6 +58,8 @@ export function getUploadSpecification(
     if (!fs.existsSync(file)) {
       throw new Error(`File ${file} does not exist`)
     }
+
+    checkArtifactFilePath(file)
 
     if (!fs.lstatSync(file).isDirectory()) {
       // Normalize and resolve, this allows for either absolute or relative paths to be used

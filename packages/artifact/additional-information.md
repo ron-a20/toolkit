@@ -4,6 +4,7 @@ Extra information
 - [Non-Supported Characters](#Non-Supported-Characters)
 - [Permission loss](#Permission-Loss)
 - [Considerations](#Considerations)
+- [Are Artifacts Zipped?](#Are-Artifacts-Zipped?)
 
 ## Non-Supported Characters
 
@@ -43,3 +44,9 @@ const uploadResult = await artifactClient.uploadArtifact(artifactName, files, ro
 During upload, each file is uploaded concurrently in 4MB chunks using a separate HTTPS connection per file. Chunked uploads are used so that in the event of a failure (which is entirely possible because the internet is not perfect), the upload can be retried. If there is an error, a retry will be attempted after a certain period of time.
 
 Uploading will be generally be faster if there are fewer files that are larger in size vs if there are lots of smaller files. Depending on the types and quantities of files being uploaded, it might be beneficial to separately compress and archive everything into a single archive (using something like `tar` or `zip`) before starting and artifact upload to speed things up.
+
+## Are Artifacts Zipped?
+
+At the end of a run, you can download artifacts from the GitHub UI. To download all parts of an artifact at once, **ONLY** during the download of artifacts from the UI, all files that make up an artifact get zipped together. The reported size is that of the zipped file that is available for download and it is different that what is actually stored (users/orgs get billed for the un-zipped amount). The download functions available in this package download all files one-by-one without any prior zipping. The upload functions in this package also do not do any zipping and each file in an artifact gets uploaded one-by-one.
+
+Long term there are plans for a more advanced UI for Artifacts that will allow artifact contents to be browsable (something like a file explorer) and individually downloadable without any zipping.

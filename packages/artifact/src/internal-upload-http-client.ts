@@ -22,7 +22,8 @@ import {
 import {
   getUploadChunkConcurrency,
   getUploadChunkSize,
-  getUploadFileConcurrency
+  getUploadFileConcurrency,
+  getUploadRetryCount
 } from './internal-config-variables'
 
 /**
@@ -178,8 +179,7 @@ async function uploadFileAsync(
           parameters.resourceUrl,
           chunk,
           start,
-          end,
-          fileSize
+          end
         )
 
         if (!result) {
@@ -217,54 +217,57 @@ async function uploadChunk(
   resourceUrl: string,
   data: NodeJS.ReadableStream,
   start: number,
-  end: number,
-  totalSize: number
+  end: number
 ): Promise<boolean> {
   info(
     `Uploading chunk of size ${end -
       start +
       1} bytes at offset ${start} with content range: ${getContentRange(
       start,
-      end,
-      totalSize
+      end
     )}`
   )
 
   const requestOptions = getRequestOptions(
     'application/octet-stream',
-    totalSize,
-    getContentRange(start, end, totalSize)
+    getContentRange(start, end)
   )
 
   const uploadChunkRequest = async (): Promise<IHttpClientResponse> => {
     return await restClient.sendStream('PUT', resourceUrl, data, requestOptions)
   }
 
-  const response = await uploadChunkRequest()
-  if (isSuccessStatusCode(response.message.statusCode)) {
-    debug(
-      `Chunk for ${start}:${end} was successfully uploaded to ${resourceUrl}`
-    )
-    return true
-  } else if (isRetryableStatusCode(response.message.statusCode)) {
-    info(
-      `Received http ${response.message.statusCode} during chunk upload, will retry at offset ${start} after 10 seconds.`
-    )
-    await new Promise(resolve => setTimeout(resolve, 10000))
-    const retryResponse = await uploadChunkRequest()
-    if (isSuccessStatusCode(retryResponse.message.statusCode)) {
+  let retryCount = 0
+  const retryLimit = getUploadRetryCount()
+
+  // Allow for failed chunks to be retried multiple times
+  while (retryCount <= retryLimit) {
+    const response = await uploadChunkRequest()
+    if (isSuccessStatusCode(response.message.statusCode)) {
+      debug(
+        `Chunk for ${start}:${end} was successfully uploaded to ${resourceUrl}`
+      )
       return true
+    } else if (isRetryableStatusCode(response.message.statusCode)) {
+      retryCount++
+      if (retryCount > retryLimit) {
+        info(
+          `Retry limit has been reached for chunk at offset ${start} to ${resourceUrl}`
+        )
+        return false
+      } else {
+        info(
+          `Received http ${response.message.statusCode} during chunk upload, will retry at offset ${start} after 10 seconds. Retry count #${retryCount}`
+        )
+        await new Promise(resolve => setTimeout(resolve, 10000))
+      }
     } else {
-      info(`Unable to upload chunk even after retrying`)
+      info('Unable to upload chunk')
       // eslint-disable-next-line no-console
       console.log(response)
       return false
     }
   }
-
-  // Upload must have failed spectacularly somehow, log full result for diagnostic purposes
-  // eslint-disable-next-line no-console
-  console.log(response)
   return false
 }
 
