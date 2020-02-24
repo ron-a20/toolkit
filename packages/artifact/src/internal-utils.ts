@@ -47,23 +47,51 @@ export function isRetryableStatusCode(statusCode?: number): boolean {
   return retryableStatusCodes.includes(statusCode)
 }
 
-export function getContentRange(start: number, end: number): string {
+export function getContentRange(start: number, end: number, total: number): string {
   // Format: `bytes start-end/fileSize
   // start and end are inclusive
   // For a 200 byte chunk starting at byte 0:
-  // Content-Range: bytes 0-199/*
-  return `bytes ${start}-${end}/*`
+  // Content-Range: bytes 0-199/200
+  return `bytes ${start}-${end}/${total}`
 }
 
 export function getRequestOptions(
   contentType?: string,
+  contentLength?: number,
   contentRange?: string
 ): IHeaders {
   const requestOptions: IHeaders = {
-    Accept: `application/json;api-version=${getApiVersion()}`
+    'Accept': `application/json;api-version=${getApiVersion()}`
   }
   if (contentType) {
     requestOptions['Content-Type'] = contentType
+  }
+  if (contentLength) {
+    requestOptions['Content-Length'] = contentLength
+  }
+  if (contentRange) {
+    requestOptions['Content-Range'] = contentRange
+  }
+  return requestOptions
+}
+
+export function getRequestOptions2(
+  contentType?: string,
+  contentLength?: number,
+  contentRange?: string
+): IHeaders {
+  const requestOptions: IHeaders = {
+    'Accept': `application/json;api-version=${getApiVersion()};res-version=4`,
+  }
+  requestOptions['Accept-Encoding'] = 'gzip'
+  requestOptions['Accept-Language'] = 'en-US'
+  requestOptions['X-TFS-FedAuthRedirect'] = "Suppress"
+
+  if (contentType) {
+    requestOptions['Content-Type'] = contentType
+  }
+  if (contentLength) {
+    requestOptions['Content-Length'] = contentLength
   }
   if (contentRange) {
     requestOptions['Content-Range'] = contentRange
