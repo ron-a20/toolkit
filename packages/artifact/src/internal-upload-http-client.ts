@@ -49,6 +49,7 @@ export async function createArtifactInFileContainer(
 
   const rawResponse = await client.post(artifactUrl, data, requestOptions)
   const body: string = await rawResponse.readBody()
+  client.dispose()
 
   if (isSuccessStatusCode(rawResponse.message.statusCode) && body) {
     return JSON.parse(body)
@@ -59,7 +60,6 @@ export async function createArtifactInFileContainer(
       `Unable to create a container for the artifact ${artifactName}`
     )
   }
-  client.dispose()
 }
 
 /**
@@ -73,7 +73,6 @@ export async function uploadArtifactToFileContainer(
   filesToUpload: UploadSpecification[],
   options?: UploadOptions
 ): Promise<UploadResults> {
-  const client = createHttpClient()
   const FILE_CONCURRENCY = getUploadFileConcurrency()
   const CHUNK_CONCURRENCY = getUploadChunkConcurrency()
   const MAX_CHUNK_SIZE = getUploadChunkSize()
@@ -95,11 +94,9 @@ export async function uploadArtifactToFileContainer(
   for (const file of filesToUpload) {
     const resourceUrl = new URL(uploadUrl)
     resourceUrl.searchParams.append('itemPath', file.uploadFilePath)
-    resourceUrl.searchParams.append('scope', '00000000-0000-0000-0000-000000000000')
     parameters.push({
       file: file.absoluteFilePath,
       resourceUrl: resourceUrl.toString(),
-      restClient: client,
       concurrency: CHUNK_CONCURRENCY,
       maxChunkSize: MAX_CHUNK_SIZE,
       continueOnError
@@ -119,11 +116,7 @@ export async function uploadArtifactToFileContainer(
     parallelUploads.map(async () => {
       while (uploadedFiles < filesToUpload.length) {
         const currentFileParameters = parameters[uploadedFiles]
-        var t5 = performance.now();
-        console.log(`Starting upload for ${currentFileParameters.file}, time is ${(t5-t0)/1000}`)
-
         uploadedFiles += 1
-        info(`File: ${uploadedFiles}/${filesToUpload.length}. ${currentFileParameters.file}`)
         if (abortPendingFileUploads) {
           failedItemsToReport.push(currentFileParameters.file)
           continue
@@ -136,8 +129,7 @@ export async function uploadArtifactToFileContainer(
         var t3 = performance.now();
         const uploadFileResult = await uploadFileAsync(currentFileParameters)
         var t4 = performance.now();
-        console.log("Call to upload " + currentFileParameters.file + " took " + (t4 - t3) + " milliseconds.");
-
+        info(`File: ${uploadedFiles}/${filesToUpload.length}. ${currentFileParameters.file} took ${(t4 - t3).toFixed(3)} milliseconds.`)
         fileSizes += uploadFileResult.successfulUploadSize
         if (uploadFileResult.isSuccess === false) {
           failedItemsToReport.push(currentFileParameters.file)
@@ -167,14 +159,16 @@ async function uploadFileAsync(
 ): Promise<UploadFileResult> {
   const fileSize: number = fs.statSync(parameters.file).size
   const parallelUploads = [...new Array(parameters.concurrency).keys()]
+  // each concurrent upload gets its own http client
+  const clients = new Array(parameters.concurrency).fill(createHttpClient())
+
   let offset = 0
   let isUploadSuccessful = true
   let failedChunkSizes = 0
   let abortFileUpload = false
 
-  const newClient = createHttpClient()
   await Promise.all(
-    parallelUploads.map(async () => {
+    parallelUploads.map(async (index) => {
       while (offset < fileSize) {
         const chunkSize = Math.min(fileSize - offset, parameters.maxChunkSize)
         if (abortFileUpload) {
@@ -199,7 +193,7 @@ async function uploadFileAsync(
 
         
         const result = await uploadChunk(
-          newClient,
+          clients[index],
           parameters.resourceUrl,
           chunk,
           start,
@@ -220,7 +214,11 @@ async function uploadFileAsync(
       }
     })
   )
-  newClient.dispose()
+
+  for(const client of clients){
+    client.dispose()
+  }
+
   return {
     isSuccess: isUploadSuccessful,
     successfulUploadSize: fileSize - failedChunkSizes
@@ -248,7 +246,7 @@ async function uploadChunk(
 ): Promise<boolean> {
   const requestOptions = getRequestOptions2(
     'application/octet-stream',
-    totalSize,
+    (end-start)+1,
     getContentRange(start, end, totalSize)
   )
 
@@ -264,6 +262,9 @@ async function uploadChunk(
   while (retryCount <= retryLimit) {
     try{
       const response = await uploadChunkRequest()
+      // read just to properly recycle the connection
+      await response.readBody()
+
       if (isSuccessStatusCode(response.message.statusCode)) {
         return true
       } else if (isRetryableStatusCode(response.message.statusCode)) {
@@ -289,6 +290,9 @@ async function uploadChunk(
     catch(error){
       console.log(error)
       
+      // dispose of the connection if there is a problem
+      restClient.dispose()
+
       retryCount++
       if (retryCount > retryLimit) {
         info(
@@ -300,6 +304,7 @@ async function uploadChunk(
           `Retrying chunk upload after encountering an error`
         )
         await new Promise(resolve => setTimeout(resolve, getRetryWaitTime()))
+        restClient = createHttpClient()
       }
     }
   }
@@ -349,7 +354,6 @@ export async function patchArtifactSize(
 interface UploadFileParameters {
   file: string
   resourceUrl: string
-  restClient: HttpClient
   concurrency: number
   maxChunkSize: number
   continueOnError: boolean

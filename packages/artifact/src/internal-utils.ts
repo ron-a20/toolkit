@@ -81,11 +81,10 @@ export function getRequestOptions2(
   contentRange?: string
 ): IHeaders {
   const requestOptions: IHeaders = {
-    'Accept': `application/json;api-version=${getApiVersion()};res-version=4`,
+    'Accept': `application/json;api-version=${getApiVersion()}`,
+    'Connection': 'Keep-Alive'
   }
-  requestOptions['Accept-Encoding'] = 'gzip'
-  requestOptions['Accept-Language'] = 'en-US'
-  requestOptions['X-TFS-FedAuthRedirect'] = "Suppress"
+  requestOptions['Keep-Alive'] = '10' // keep alive for 10 seconds before closing connection
 
   if (contentType) {
     requestOptions['Content-Type'] = contentType

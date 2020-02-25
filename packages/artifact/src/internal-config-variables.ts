@@ -18,7 +18,7 @@ export function getRetryWaitTime(): number {
   /*
   Timeout errors can be expected when When uploading large amounts of files due to the huge number of http calls being made
   */
-  return 30000
+  return 10000
 }
 
 export function getDownloadFileConcurrency(): number {
