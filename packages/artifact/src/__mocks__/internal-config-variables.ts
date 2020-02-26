@@ -5,10 +5,6 @@ export function getUploadFileConcurrency(): number {
   return 1
 }
 
-export function getUploadChunkConcurrency(): number {
-  return 1
-}
-
 export function getUploadChunkSize(): number {
   return 4 * 1024 * 1024 // 4 MB Chunks
 }

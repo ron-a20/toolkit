@@ -23,7 +23,7 @@ import {warning} from '@actions/core'
 export async function listArtifacts(): Promise<ListArtifactsResponse> {
   const artifactUrl = getArtifactUrl()
   const client = createHttpClient()
-  const requestOptions = getRequestOptions('application/json')
+  const requestOptions = getRequestOptions('application/json', false)
 
   const rawResponse = await client.get(artifactUrl, requestOptions)
   const body: string = await rawResponse.readBody()
@@ -69,15 +69,15 @@ export async function downloadSingleArtifact(
   const DOWNLOAD_CONCURRENCY = getDownloadFileConcurrency()
   // Limit the number of files downloaded at a single time
   const parallelDownloads = [...new Array(DOWNLOAD_CONCURRENCY).keys()]
-  const client = createHttpClient()
+  const httpClients = new Array(DOWNLOAD_CONCURRENCY).fill(createHttpClient())
   let downloadedFiles = 0
   await Promise.all(
-    parallelDownloads.map(async () => {
+    parallelDownloads.map(async index => {
       while (downloadedFiles < downloadItems.length) {
         const currentFileToDownload = downloadItems[downloadedFiles]
         downloadedFiles += 1
         await downloadIndividualFile(
-          client,
+          httpClients[index],
           currentFileToDownload.sourceLocation,
           currentFileToDownload.targetPath
         )

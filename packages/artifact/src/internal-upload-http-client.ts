@@ -1,3 +1,6 @@
+import * as fs from 'fs'
+import * as zlib from 'zlib'
+import {PassThrough, Transform} from 'stream'
 import {debug, warning, info} from '@actions/core'
 import {HttpClientResponse, HttpClient} from '@actions/http-client/index'
 import {IHttpClientResponse} from '@actions/http-client/interfaces'
@@ -7,7 +10,6 @@ import {
   PatchArtifactSize,
   UploadResults
 } from './internal-contracts'
-import * as fs from 'fs'
 import {UploadSpecification} from './internal-upload-specification'
 import {UploadOptions} from './internal-upload-options'
 import {URL} from 'url'
@@ -16,19 +18,16 @@ import {
   getArtifactUrl,
   getContentRange,
   getRequestOptions,
-  getRequestOptions2,
   isRetryableStatusCode,
-  isSuccessStatusCode,
-  checkArtifactFilePath
+  isSuccessStatusCode
 } from './internal-utils'
 import {
-  getUploadChunkConcurrency,
   getUploadChunkSize,
   getUploadFileConcurrency,
   getUploadRetryCount,
   getRetryWaitTime
 } from './internal-config-variables'
-import { performance } from 'perf_hooks'
+import {performance} from 'perf_hooks'
 
 /**
  * Creates a file container for the new artifact in the remote blob storage/file service
@@ -44,12 +43,12 @@ export async function createArtifactInFileContainer(
   }
   const data: string = JSON.stringify(parameters, null, 2)
   const artifactUrl = getArtifactUrl()
+  // No concurrent calls so a single client without `keep-alive` is sufficient
   const client = createHttpClient()
-  const requestOptions = getRequestOptions('application/json')
+  const requestOptions = getRequestOptions('application/json', false, false)
 
   const rawResponse = await client.post(artifactUrl, data, requestOptions)
   const body: string = await rawResponse.readBody()
-  client.dispose()
 
   if (isSuccessStatusCode(rawResponse.message.statusCode) && body) {
     return JSON.parse(body)
@@ -74,10 +73,9 @@ export async function uploadArtifactToFileContainer(
   options?: UploadOptions
 ): Promise<UploadResults> {
   const FILE_CONCURRENCY = getUploadFileConcurrency()
-  const CHUNK_CONCURRENCY = getUploadChunkConcurrency()
   const MAX_CHUNK_SIZE = getUploadChunkSize()
   debug(
-    `File Concurrency: ${FILE_CONCURRENCY}, Chunk Concurrency: ${CHUNK_CONCURRENCY} and Chunk Size: ${MAX_CHUNK_SIZE}`
+    `File Concurrency: ${FILE_CONCURRENCY}, and Chunk Size: ${MAX_CHUNK_SIZE}`
   )
 
   const parameters: UploadFileParameters[] = []
@@ -97,39 +95,62 @@ export async function uploadArtifactToFileContainer(
     parameters.push({
       file: file.absoluteFilePath,
       resourceUrl: resourceUrl.toString(),
-      concurrency: CHUNK_CONCURRENCY,
       maxChunkSize: MAX_CHUNK_SIZE,
       continueOnError
     })
   }
 
   const parallelUploads = [...new Array(FILE_CONCURRENCY).keys()]
+  // each parallel upload gets its own http client
+  const clientManagerInstance = HttpUploadManager.getInstance()
+  clientManagerInstance.createClients(FILE_CONCURRENCY)
   const failedItemsToReport: string[] = []
-  let uploadedFiles = 0
+  let currentFile = 0
+  let completedFiles = 0
   let fileSizes = 0
   let abortPendingFileUploads = false
 
-  var t0 = performance.now();
+  // Every 10 seconds, display information about the upload status
+  const totalUploadStatus = setInterval(function() {
+    info(
+      `Total file(s): ${
+        filesToUpload.length
+      } ---- Processing file #${currentFile} (${(
+        (completedFiles / filesToUpload.length) *
+        100
+      ).toFixed(2)}%)`
+    )
+  }, 10000)
 
   // Only allow a certain amount of files to be uploaded at once, this is done to reduce potential errors
   await Promise.all(
-    parallelUploads.map(async () => {
-      while (uploadedFiles < filesToUpload.length) {
-        const currentFileParameters = parameters[uploadedFiles]
-        uploadedFiles += 1
+    parallelUploads.map(async index => {
+      while (currentFile < filesToUpload.length) {
+        const currentFileParameters = parameters[currentFile]
+        currentFile += 1
         if (abortPendingFileUploads) {
           failedItemsToReport.push(currentFileParameters.file)
           continue
         }
 
-        if(uploadedFiles % 1000 === 0){
-          var t1 = performance.now();
-          console.log("Call to upload " + uploadedFiles + " took " + (t1 - t0)/1000 + " seconds.");
-        }
-        var t3 = performance.now();
-        const uploadFileResult = await uploadFileAsync(currentFileParameters)
-        var t4 = performance.now();
-        info(`File: ${uploadedFiles}/${filesToUpload.length}. ${currentFileParameters.file} took ${(t4 - t3).toFixed(3)} milliseconds.`)
+        const startTime = performance.now()
+        const uploadFileResult = await uploadFileAsync(
+          index,
+          currentFileParameters
+        )
+
+        if(uploadFileResult){
+          // increment count after an uploadResult is returned
+          completedFiles++
+        }  
+        
+        debug(
+          `File: ${completedFiles}/${filesToUpload.length}. ${
+            currentFileParameters.file
+          } took ${(performance.now() - startTime).toFixed(
+            3
+          )} milliseconds to finish upload`
+        )
         fileSizes += uploadFileResult.successfulUploadSize
         if (uploadFileResult.isSuccess === false) {
           failedItemsToReport.push(currentFileParameters.file)
@@ -142,6 +163,11 @@ export async function uploadArtifactToFileContainer(
     })
   )
 
+  clearInterval(totalUploadStatus)
+
+  // done uploading, safety dispose all connections
+  clientManagerInstance.disposeAllConnections()
+
   info(`Total size of all the files uploaded is ${fileSizes} bytes`)
   return {
     size: fileSizes,
@@ -151,74 +177,78 @@ export async function uploadArtifactToFileContainer(
 
 /**
  * Asynchronously uploads a file. If the file is bigger than the max chunk size it will be uploaded via multiple calls
+ * @param {number} httpClientIndex The index of the httpClient that is being used to make all of the calls
  * @param {UploadFileParameters} parameters Information about the file that needs to be uploaded
  * @returns The size of the file that was uploaded in bytes along with any failed uploads
  */
 async function uploadFileAsync(
+  httpClientIndex: number,
   parameters: UploadFileParameters
 ): Promise<UploadFileResult> {
   const fileSize: number = fs.statSync(parameters.file).size
-  const parallelUploads = [...new Array(parameters.concurrency).keys()]
-  // each concurrent upload gets its own http client
-  const clients = new Array(parameters.concurrency).fill(createHttpClient())
-
   let offset = 0
   let isUploadSuccessful = true
   let failedChunkSizes = 0
   let abortFileUpload = false
 
-  await Promise.all(
-    parallelUploads.map(async (index) => {
-      while (offset < fileSize) {
-        const chunkSize = Math.min(fileSize - offset, parameters.maxChunkSize)
-        if (abortFileUpload) {
-          // if we don't want to continue on error, any pending upload chunk will be marked as failed
-          failedChunkSizes += chunkSize
-          continue
-        }
+  // If a single file is taking longer than 15 seconds to upload, display status information for the file
+  const uploadFileStatus = setInterval(function() {
+    info(
+      `Uploading ${parameters.file} (${((offset / fileSize) * 100).toFixed(
+        2
+      )}%)`
+    )
+  }, 15000)
 
-        const start = offset
-        const end = offset + chunkSize - 1
-        offset += parameters.maxChunkSize
-      
-        //checkArtifactFilePath(parameters.file)
-        const chunk: NodeJS.ReadableStream = fs.createReadStream(
-          parameters.file,
-          {
-            start,
-            end,
-            autoClose: true
-          }
-        )
+  // upload only a single chunk at a time
+  while (offset < fileSize) {
+    const chunkSize = Math.min(fileSize - offset, parameters.maxChunkSize)
+    if (abortFileUpload) {
+      // if we don't want to continue on error, any pending upload chunk will be marked as failed
+      failedChunkSizes += chunkSize
+      continue
+    }
 
-        
-        const result = await uploadChunk(
-          clients[index],
-          parameters.resourceUrl,
-          chunk,
-          start,
-          end,
-          fileSize
-        )
+    const start = offset
+    const end = offset + chunkSize - 1
+    offset += parameters.maxChunkSize
 
-        if (!result) {
-          /**
-           * Chunk failed to upload, report as failed and do not continue uploading any more chunks for the file. It is possible that part of a chunk was
-           * successfully uploaded so the server may report a different size for what was uploaded
-           **/
-          isUploadSuccessful = false
-          failedChunkSizes += chunkSize
-          warning(`Aborting upload for ${parameters.file} due to failure`)
-          abortFileUpload = true
-        }
-      }
+    const chunk = fs.createReadStream(parameters.file, {
+      start,
+      end,
+      autoClose: false
     })
-  )
 
-  for(const client of clients){
-    client.dispose()
+    // Create gzip stream for the specific chunk being uploaded
+    // Use PassThrough to avoid having to pipe to a writable stream
+    const gzip = zlib.createGzip()
+    //const passThrough = new PassThrough()
+    const out = fs.createWriteStream(`${parameters.file}.tmp`);
+    chunk.pipe(gzip).pipe(out)
+    const testing = fs.createReadStream(`${parameters.file}.tmp`)
+
+    const result = await uploadChunk(
+      httpClientIndex,
+      parameters.resourceUrl,
+      testing,
+      start,
+      end,
+      fileSize
+    )
+
+    if (!result) {
+      /**
+       * Chunk failed to upload, report as failed and do not continue uploading any more chunks for the file. It is possible that part of a chunk was
+       * successfully uploaded so the server may report a different size for what was uploaded
+       **/
+      isUploadSuccessful = false
+      failedChunkSizes += chunkSize
+      warning(`Aborting upload for ${parameters.file} due to failure`)
+      abortFileUpload = true
+    }
   }
 
+  clearInterval(uploadFileStatus)
   return {
     isSuccess: isUploadSuccessful,
     successfulUploadSize: fileSize - failedChunkSizes
@@ -228,7 +258,7 @@ async function uploadFileAsync(
 /**
  * Uploads a chunk of an individual file to the specified resourceUrl. If the upload fails and the status code
  * indicates a retryable status, we try to upload the chunk as well
- * @param {HttpClient} restClient RestClient that will be making the appropriate HTTP call
+ * @param {number} httpClientIndex The index of the httpClient being used to make all the necessary calls
  * @param {string} resourceUrl Url of the resource that the chunk will be uploaded to
  * @param {NodeJS.ReadableStream} data Stream of the file that will be uploaded
  * @param {number} start Starting byte index of file that the chunk belongs to
@@ -237,21 +267,27 @@ async function uploadFileAsync(
  * @returns if the chunk was successfully uploaded
  */
 async function uploadChunk(
-  restClient: HttpClient,
+  httpClientIndex: number,
   resourceUrl: string,
   data: NodeJS.ReadableStream,
   start: number,
   end: number,
   totalSize: number
 ): Promise<boolean> {
-  const requestOptions = getRequestOptions2(
+  const requestOptions = getRequestOptions(
     'application/octet-stream',
-    (end-start)+1,
+    true,
+    true,
+    end - start + 1,
     getContentRange(start, end, totalSize)
   )
 
+  const httpManager = HttpUploadManager.getInstance()
+
   const uploadChunkRequest = async (): Promise<IHttpClientResponse> => {
-    return await restClient.sendStream('PUT', resourceUrl, data, requestOptions)
+    return await httpManager
+      .getClient(httpClientIndex)
+      .sendStream('PUT', resourceUrl, data, requestOptions)
   }
 
   let retryCount = 0
@@ -260,14 +296,17 @@ async function uploadChunk(
   // Allow for failed chunks to be retried multiple times
   // change this to a nice for with retryCount incrementing
   while (retryCount <= retryLimit) {
-    try{
+    try {
       const response = await uploadChunkRequest()
-      // read just to properly recycle the connection
-      await response.readBody()
+      // read the body so that the response is ac
+      const testing = await response.readBody()
+      console.log(testing)
 
       if (isSuccessStatusCode(response.message.statusCode)) {
         return true
       } else if (isRetryableStatusCode(response.message.statusCode)) {
+        // dispose the existing connection and create a new one
+        httpManager.disposeClient(httpClientIndex)
         retryCount++
         if (retryCount > retryLimit) {
           info(
@@ -276,22 +315,20 @@ async function uploadChunk(
           return false
         } else {
           info(
-            `Received http ${response.message.statusCode} during chunk upload, will retry at offset ${start} after 10 seconds. Retry count #${retryCount}`
+            `HTTP ${response.message.statusCode} during chunk upload, will retry at offset ${start} after 10 seconds. Retry count #${retryCount}. URL ${resourceUrl}`
           )
           await new Promise(resolve => setTimeout(resolve, getRetryWaitTime()))
+          httpManager.replaceClient(httpClientIndex)
         }
       } else {
-        info('Unable to upload chunk')
+        info(`#ERROR# Unable to upload chunk to ${resourceUrl}`)
         // eslint-disable-next-line no-console
         console.log(response)
         return false
       }
-    }
-    catch(error){
-      console.log(error)
-      
-      // dispose of the connection if there is a problem
-      restClient.dispose()
+    } catch (error) {
+      // If an error is thrown, it is most likely due to a timeout, dispose of the connection, wait and retry with a new connection
+      httpManager.disposeClient(httpClientIndex)
 
       retryCount++
       if (retryCount > retryLimit) {
@@ -300,11 +337,9 @@ async function uploadChunk(
         )
         return false
       } else {
-        info(
-          `Retrying chunk upload after encountering an error`
-        )
+        info(`Retrying chunk upload after encountering an error`)
         await new Promise(resolve => setTimeout(resolve, getRetryWaitTime()))
-        restClient = createHttpClient()
+        httpManager.replaceClient(httpClientIndex)
       }
     }
   }
@@ -320,8 +355,9 @@ export async function patchArtifactSize(
   size: number,
   artifactName: string
 ): Promise<void> {
+  // No concurrent calls so a single client without `keep-alive` is sufficient
   const client = createHttpClient()
-  const requestOptions = getRequestOptions('application/json')
+  const requestOptions = getRequestOptions('application/json', false, false)
   const resourceUrl = new URL(getArtifactUrl())
   resourceUrl.searchParams.append('artifactName', artifactName)
 
@@ -348,13 +384,11 @@ export async function patchArtifactSize(
     console.log(body)
     throw new Error(`Unable to finish uploading artifact ${artifactName}`)
   }
-  client.dispose()
 }
 
 interface UploadFileParameters {
   file: string
   resourceUrl: string
-  concurrency: number
   maxChunkSize: number
   continueOnError: boolean
 }
@@ -362,4 +396,46 @@ interface UploadFileParameters {
 interface UploadFileResult {
   isSuccess: boolean
   successfulUploadSize: number
+}
+
+/**
+ * Used for managing http connections with concurrent uploads to limit the number of tcp connections created
+ */
+class HttpUploadManager {
+  private static _instance: HttpUploadManager = new HttpUploadManager()
+  private clients: HttpClient[]
+
+  constructor() {
+    if (HttpUploadManager._instance) {
+      throw new Error('Error: Singleton HttpManager already instantiated')
+    }
+    HttpUploadManager._instance = this
+    this.clients = []
+  }
+
+  static getInstance(): HttpUploadManager {
+    return HttpUploadManager._instance
+  }
+
+  createClients(concurrency: number): void {
+    this.clients = new Array(concurrency).fill(createHttpClient())
+  }
+
+  getClient(index: number): HttpClient {
+    return this.clients[index]
+  }
+
+  disposeClient(index: number): void {
+    this.clients[index].dispose()
+  }
+
+  replaceClient(index: number): void {
+    this.clients[index] = createHttpClient()
+  }
+
+  disposeAllConnections(): void {
+    for (const client of this.clients) {
+      client.dispose()
+    }
+  }
 }

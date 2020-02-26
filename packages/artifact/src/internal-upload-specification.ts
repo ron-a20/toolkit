@@ -1,7 +1,7 @@
 import * as fs from 'fs'
 import {debug} from '@actions/core'
 import {join, normalize, resolve} from 'path'
-import {checkArtifactName} from './internal-utils'
+import {checkArtifactName, checkArtifactFilePath} from './internal-utils'
 
 export interface UploadSpecification {
   absoluteFilePath: string
@@ -68,6 +68,10 @@ export function getUploadSpecification(
         )
       }
 
+      // Check for forbidden characters in file paths that will be rejected during upload
+      const uploadPath = file.replace(rootDirectory, '')
+      checkArtifactFilePath(uploadPath)
+
       /*
         uploadFilePath denotes where the file will be uploaded in the file container on the server. During a run, if multiple artifacts are uploaded, they will all
         be saved in the same container. The artifact name is used as the root directory in the container to separate and distinguish uploaded artifacts
@@ -80,7 +84,7 @@ export function getUploadSpecification(
       */
       specifications.push({
         absoluteFilePath: file,
-        uploadFilePath: join(artifactName, file.replace(rootDirectory, ''))
+        uploadFilePath: join(artifactName, uploadPath)
       })
     } else {
       // Directories are rejected by the server during upload

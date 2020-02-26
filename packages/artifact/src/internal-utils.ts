@@ -47,7 +47,11 @@ export function isRetryableStatusCode(statusCode?: number): boolean {
   return retryableStatusCodes.includes(statusCode)
 }
 
-export function getContentRange(start: number, end: number, total: number): string {
+export function getContentRange(
+  start: number,
+  end: number,
+  total: number
+): string {
   // Format: `bytes start-end/fileSize
   // start and end are inclusive
   // For a 200 byte chunk starting at byte 0:
@@ -57,35 +61,21 @@ export function getContentRange(start: number, end: number, total: number): stri
 
 export function getRequestOptions(
   contentType?: string,
+  isKeepAlive?: boolean,
+  isGzip?: boolean,
   contentLength?: number,
   contentRange?: string
 ): IHeaders {
   const requestOptions: IHeaders = {
-    'Accept': `application/json;api-version=${getApiVersion()}`
+    Accept: `application/json;api-version=${getApiVersion()}`
   }
-  if (contentType) {
-    requestOptions['Content-Type'] = contentType
+  if (isKeepAlive) {
+    requestOptions['Connection'] = 'Keep-Alive'
+    requestOptions['Keep-Alive'] = '10' // keep alive for 10 seconds before closing connection
   }
-  if (contentLength) {
-    requestOptions['Content-Length'] = contentLength
+  if (isGzip){
+    requestOptions['Content-Encoding'] = 'gzip' // for uploading very large files from self-hosted runners
   }
-  if (contentRange) {
-    requestOptions['Content-Range'] = contentRange
-  }
-  return requestOptions
-}
-
-export function getRequestOptions2(
-  contentType?: string,
-  contentLength?: number,
-  contentRange?: string
-): IHeaders {
-  const requestOptions: IHeaders = {
-    'Accept': `application/json;api-version=${getApiVersion()}`,
-    'Connection': 'Keep-Alive'
-  }
-  requestOptions['Keep-Alive'] = '10' // keep alive for 10 seconds before closing connection
-
   if (contentType) {
     requestOptions['Content-Type'] = contentType
   }

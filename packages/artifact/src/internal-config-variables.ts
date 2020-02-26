@@ -2,10 +2,6 @@ export function getUploadFileConcurrency(): number {
   return 2
 }
 
-export function getUploadChunkConcurrency(): number {
-  return 1
-}
-
 export function getUploadChunkSize(): number {
   return 4 * 1024 * 1024 // 4 MB Chunks
 }
@@ -16,9 +12,9 @@ export function getUploadRetryCount(): number {
 
 export function getRetryWaitTime(): number {
   /*
-  Timeout errors can be expected when When uploading large amounts of files due to the huge number of http calls being made
+  Timeout errors can happen when uploading large amounts of files due to the huge number of http calls being made
   */
-  return 10000
+  return 30000
 }
 
 export function getDownloadFileConcurrency(): number {
