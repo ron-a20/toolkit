@@ -1,4 +1,5 @@
 import * as fs from 'fs'
+import * as zlib from 'zlib'
 import {
   createHttpClient,
   getArtifactUrl,
@@ -99,8 +100,12 @@ export async function downloadIndividualFile(
 ): Promise<void> {
   const stream = fs.createWriteStream(downloadPath)
   const response = await client.get(artifactLocation)
+  let isGzip = false
+  if (response.message.headers["content-encoding"] && response.message.headers["content-encoding"] === 'gzip'){
+    isGzip = true
+  }
   if (isSuccessStatusCode(response.message.statusCode)) {
-    await pipeResponseToStream(response, stream)
+    await pipeResponseToStream(response, stream, isGzip)
   } else if (isRetryableStatusCode(response.message.statusCode)) {
     warning(
       `Received http ${response.message.statusCode} during file download, will retry ${artifactLocation} after 10 seconds`
@@ -108,7 +113,12 @@ export async function downloadIndividualFile(
     await new Promise(resolve => setTimeout(resolve, 10000))
     const retryResponse = await client.get(artifactLocation)
     if (isSuccessStatusCode(retryResponse.message.statusCode)) {
-      await pipeResponseToStream(response, stream)
+      if (response.message.headers["content-encoding"] && response.message.headers["content-encoding"] === 'gzip'){
+        isGzip = true
+      } else {
+        isGzip = false
+      }
+      await pipeResponseToStream(response, stream, isGzip)
     } else {
       // eslint-disable-next-line no-console
       console.log(retryResponse)
@@ -123,11 +133,20 @@ export async function downloadIndividualFile(
 
 export async function pipeResponseToStream(
   response: IHttpClientResponse,
-  stream: NodeJS.WritableStream
+  stream: NodeJS.WritableStream,
+  isGzip: boolean
 ): Promise<void> {
   return new Promise(resolve => {
-    response.message.pipe(stream).on('close', () => {
-      resolve()
-    })
+    if(isGzip){
+      // pipe the response into gunzip to decompress
+      var gunzip = zlib.createGunzip();
+      response.message.pipe(gunzip).pipe(stream).on('close', () => {
+        resolve()
+      })
+    } else {
+      response.message.pipe(stream).on('close', () => {
+        resolve()
+      })
+    }
   })
 }

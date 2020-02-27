@@ -1,6 +1,6 @@
 import * as fs from 'fs'
 import * as zlib from 'zlib'
-import {PassThrough, Transform} from 'stream'
+import * as tmp from 'tmp'
 import {debug, warning, info} from '@actions/core'
 import {HttpClientResponse, HttpClient} from '@actions/http-client/index'
 import {IHttpClientResponse} from '@actions/http-client/interfaces'
@@ -185,73 +185,117 @@ async function uploadFileAsync(
   httpClientIndex: number,
   parameters: UploadFileParameters
 ): Promise<UploadFileResult> {
-  const fileSize: number = fs.statSync(parameters.file).size
+  const originalFileSize: number = fs.statSync(parameters.file).size
   let offset = 0
   let isUploadSuccessful = true
   let failedChunkSizes = 0
   let abortFileUpload = false
 
-  // If a single file is taking longer than 15 seconds to upload, display status information for the file
-  const uploadFileStatus = setInterval(function() {
-    info(
-      `Uploading ${parameters.file} (${((offset / fileSize) * 100).toFixed(
-        2
-      )}%)`
-    )
-  }, 15000)
+  // Gzip original upload file into a temporary file that will be uplaoded
+  tmp.file(async function _tempFileCreated(error, tempFilePath, fd, cleanupCallback) {
+    if (error) throw error;
+    
+    console.log(`Temp Gzip is ${tempFilePath}`)
 
-  // upload only a single chunk at a time
-  while (offset < fileSize) {
-    const chunkSize = Math.min(fileSize - offset, parameters.maxChunkSize)
-    if (abortFileUpload) {
-      // if we don't want to continue on error, any pending upload chunk will be marked as failed
-      failedChunkSizes += chunkSize
-      continue
+    const gzip = zlib.createGzip();
+    const inputStream = fs.createReadStream(parameters.file);
+    const gZipTempFile = fs.createWriteStream(tempFilePath)
+
+    async function openReadStream(): Promise<void> {
+      return new Promise<void>(resolve => {
+        inputStream.on('open', resolve);
+      })
     }
 
-    const start = offset
-    const end = offset + chunkSize - 1
-    offset += parameters.maxChunkSize
+    async function pipeStreams(): Promise<number> {
+      return new Promise<number> (() => {
+        const gzipPipeResult = inputStream.pipe(gzip)
+        gzipPipeResult.on('finish', () => {
+          console.log('gzip pipe has finished')
+          const tempFilePipe = gzip.pipe(gZipTempFile)
+          tempFilePipe.on('finish', () => {
+            return fs.statSync(tempFilePath).size
+          })     
+        })
+      })
+    }
 
-    const chunk = fs.createReadStream(parameters.file, {
-      start,
-      end,
-      autoClose: false
+    const gZipFileSize = await Promise.resolve(openReadStream()).then(() => {
+      console.log('read stream has been opened')
+      return Promise.resolve(pipeStreams()).then(() => {
+        console.log('write stream has finished')
+        return pipeStreams()
+      })
     })
 
-    // Create gzip stream for the specific chunk being uploaded
-    // Use PassThrough to avoid having to pipe to a writable stream
-    const gzip = zlib.createGzip()
-    //const passThrough = new PassThrough()
-    const out = fs.createWriteStream(`${parameters.file}.tmp`);
-    chunk.pipe(gzip).pipe(out)
-    const testing = fs.createReadStream(`${parameters.file}.tmp`)
+    console.log(`Gzip file size is ${gZipFileSize}`)
 
-    const result = await uploadChunk(
-      httpClientIndex,
-      parameters.resourceUrl,
-      testing,
-      start,
-      end,
-      fileSize
-    )
+    let uploadFileSize = gZipFileSize
+    let uploadFilePath = tempFilePath
+    let isGzip = true
 
-    if (!result) {
-      /**
-       * Chunk failed to upload, report as failed and do not continue uploading any more chunks for the file. It is possible that part of a chunk was
-       * successfully uploaded so the server may report a different size for what was uploaded
-       **/
-      isUploadSuccessful = false
-      failedChunkSizes += chunkSize
-      warning(`Aborting upload for ${parameters.file} due to failure`)
-      abortFileUpload = true
+    if (uploadFileSize > originalFileSize){
+      // compression did not help out
+      uploadFileSize = originalFileSize
+      uploadFilePath = parameters.file
+      isGzip = false
+      // delete temp Gzip file
+      cleanupCallback();
     }
-  }
 
-  clearInterval(uploadFileStatus)
+    console.log(`UploadFileSize is ${uploadFileSize}`)
+    console.log(`UploadFilePath is ${uploadFilePath}`)
+
+    // upload only a single chunk at a time
+    while (offset < uploadFileSize) {
+      const chunkSize = Math.min(gZipFileSize - offset, parameters.maxChunkSize)
+      if (abortFileUpload) {
+        // if we don't want to continue on error, any pending upload chunk will be marked as failed
+        failedChunkSizes += chunkSize
+        continue
+      }
+
+      const start = offset
+      const end = offset + chunkSize - 1
+      offset += parameters.maxChunkSize
+
+      const chunk = fs.createReadStream(uploadFilePath, {
+        start,
+        end,
+        autoClose: false
+      })
+
+      const result = await uploadChunk(
+        httpClientIndex,
+        parameters.resourceUrl,
+        chunk,
+        start,
+        end,
+        uploadFileSize,
+        isGzip
+      )
+
+      if (!result) {
+        /**
+         * Chunk failed to upload, report as failed and do not continue uploading any more chunks for the file. It is possible that part of a chunk was
+         * successfully uploaded so the server may report a different size for what was uploaded
+         **/
+        isUploadSuccessful = false
+        failedChunkSizes += chunkSize
+        warning(`Aborting upload for ${parameters.file} due to failure`)
+        abortFileUpload = true
+      }
+    }
+
+    // Clean up temporary file
+    if(isGzip){
+      cleanupCallback();
+    }
+  });
+
   return {
     isSuccess: isUploadSuccessful,
-    successfulUploadSize: fileSize - failedChunkSizes
+    successfulUploadSize: originalFileSize - failedChunkSizes // TODO fix reported size
   }
 }
 
@@ -264,6 +308,7 @@ async function uploadFileAsync(
  * @param {number} start Starting byte index of file that the chunk belongs to
  * @param {number} end Ending byte index of file that the chunk belongs to
  * @param {number} totalSize Total size of the file in bytes that is being uploaded
+ * @param {boolean} isGzip Denotes if we are uploading a Gzip compressed stream
  * @returns if the chunk was successfully uploaded
  */
 async function uploadChunk(
@@ -272,12 +317,13 @@ async function uploadChunk(
   data: NodeJS.ReadableStream,
   start: number,
   end: number,
-  totalSize: number
+  totalSize: number,
+  isGzip: boolean
 ): Promise<boolean> {
   const requestOptions = getRequestOptions(
     'application/octet-stream',
     true,
-    true,
+    isGzip,
     end - start + 1,
     getContentRange(start, end, totalSize)
   )

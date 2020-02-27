@@ -47,6 +47,8 @@ Uploading will be generally be faster if there are fewer files that are larger i
 
 ## Are Artifacts Zipped?
 
-At the end of a run, you can download artifacts from the GitHub UI. To download all parts of an artifact at once, **ONLY** during the download of artifacts from the UI, all files that make up an artifact get zipped together. The reported size is that of the zipped file that is available for download and it is different that what is actually stored (users/orgs get billed for the un-zipped amount). The download functions available in this package download all files one-by-one without any prior zipping. The upload functions in this package also do not do any zipping and each file in an artifact gets uploaded one-by-one.
+During upload, GZip is used to compress individual files before upload (if GZip does not reduce the file size, files are uploaded as-is). If a file gets uploaded with GZip, it is stored in the same format after being uploaded. GZip is used to significantly reduce the amount of data that is uploaded and to reduce the amount of HTTP calls made. This has huge performance implications particularly with self-hosted runners.
+
+At the end of a run, you can download artifacts from the GitHub UI. To download all parts of an artifact at once, a zip file is created for all the individual files uploaded. Any previously GZipped files get decompressed and added to the Zip file. 
 
 Long term there are plans for a more advanced UI for Artifacts that will allow artifact contents to be individually downloadable without any zipping.
